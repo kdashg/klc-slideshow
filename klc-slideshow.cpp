@@ -488,7 +488,21 @@ public:
             m.d3d->GetImmediateContext(&context.setter_addrefs());
             REL_ASSERT(context, "context");
 
-            context->UpdateSubresource(flag_surf_tex, 0, nullptr,
+            auto tex_desc = D3D11_TEXTURE2D_DESC{};
+            flag_surf_tex->GetDesc(&tex_desc);
+            dout() << "tex_desc: "
+               << "Width " << tex_desc.Width << ", "
+               << "Height " << tex_desc.Height;
+            auto flag_box = D3D11_BOX{};
+            flag_box.left = draw_offset.x;
+            flag_box.top = draw_offset.y;
+            flag_box.right = flag_box.left + m.flag_size.x;
+            flag_box.bottom = flag_box.top + m.flag_size.y;
+            flag_box.front = 0;
+            flag_box.back = 1;
+
+
+            context->UpdateSubresource(flag_surf_tex, 0, &flag_box,
                                        flag.pixels.data(),
                                        flag.size.x * 4,
                                        flag.size.y * flag.size.x * 4);
@@ -556,8 +570,8 @@ public:
    ~Renderer() = default;
 
    void Draw(const vec3& from, const vec3& to) const {
-      dout() << "from " << from.x << "," << from.y;
-      dout() << "to " << to.x << "," << to.y;
+      //dout() << "from " << from.x << "," << from.y;
+      //dout() << "to " << to.x << "," << to.y;
       auto mat = D2D_MATRIX_3X2_F{};
       mat.m11 = (to.x - from.x) / m.flag_size.x;
       mat.m22 = (to.y - from.y) / m.flag_size.y;
@@ -573,14 +587,16 @@ public:
 
       auto stats = DCOMPOSITION_FRAME_STATISTICS{};
       m.dcomp->GetFrameStatistics(&stats);
-      dout() << "timeFrequency: " << stats.timeFrequency.QuadPart;
-      //dout() << "lastFrameTime: " << stats.lastFrameTime.QuadPart;
-      const double per_sec = stats.timeFrequency.QuadPart;
-      dout() << "lastFrameTime: " << stats.lastFrameTime.QuadPart / per_sec;
-      dout() << "currentTime: " << stats.currentTime.QuadPart / per_sec;
-      dout() << "nextEstimatedFrameTime: " << stats.nextEstimatedFrameTime.QuadPart / per_sec;
-      const auto& rate = stats.currentCompositionRate;
-      dout() << "currentCompositionRate: " << rate.Numerator << "/" << rate.Denominator;
+      if (0) {
+         dout() << "timeFrequency: " << stats.timeFrequency.QuadPart;
+         //dout() << "lastFrameTime: " << stats.lastFrameTime.QuadPart;
+         const double per_sec = stats.timeFrequency.QuadPart;
+         dout() << "lastFrameTime: " << stats.lastFrameTime.QuadPart / per_sec;
+         dout() << "currentTime: " << stats.currentTime.QuadPart / per_sec;
+         dout() << "nextEstimatedFrameTime: " << stats.nextEstimatedFrameTime.QuadPart / per_sec;
+         const auto& rate = stats.currentCompositionRate;
+         dout() << "currentCompositionRate: " << rate.Numerator << "/" << rate.Denominator;
+      }
    }
 };
 
