@@ -33,6 +33,8 @@
 using std::move;
 using u32 = uint32_t;
 
+constexpr bool INTENSIFY = false;
+
 // -
 
 #define REL_ASSERT(X,M) \
@@ -501,8 +503,11 @@ public:
             flag_box.front = 0;
             flag_box.back = 1;
 
-
-            context->UpdateSubresource(flag_surf_tex, 0, &flag_box,
+            const auto* pbox = &flag_box;
+            if (INTENSIFY) {
+               pbox = nullptr; // Can has little a corruption, as a treat.
+            }
+            context->UpdateSubresource(flag_surf_tex, 0, pbox,
                                        flag.pixels.data(),
                                        flag.size.x * 4,
                                        flag.size.y * flag.size.x * 4);
@@ -631,7 +636,10 @@ public:
    void Paint() {
       dout() << "Paint";
 
-      const auto now = run_ms() / 1000;
+      auto now = run_ms() / 1000;
+      if (INTENSIFY) {
+         now *= 1000 * 1000;
+      }
 
       constexpr float radius = 0.1;
       auto center = vec3{};
