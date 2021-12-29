@@ -16,11 +16,19 @@ os.chdir(OUT)
 COMPILE_FLAGS = "/std:c++17 /EHsc".split(' ')
 FILES = "..\klc-slideshow.cpp".split(' ')
 LINK_FLAGS = "/link /subsystem:WINDOWS".split(' ')
-OUTPUT = "klc-slideshow.scr"
+OUTPUT = "klc-slideshow.exe" # VS doesn't like debugging a .scr
+#OUTPUT = "klc-slideshow.scr"
+
+if 1:
+   COMPILE_FLAGS.append('/Zi') # debug info
 
 def run(*args):
    print('> ', args, '\n')
-   return subprocess.run(args, check=True);
+   try:
+      return subprocess.run(args, check=True);
+   except:
+      print('');
+      raise
 
 link_flags = LINK_FLAGS + ['/out:'+OUTPUT]
 run('cl', *COMPILE_FLAGS, *FILES, *link_flags);
