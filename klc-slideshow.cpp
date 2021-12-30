@@ -5,6 +5,8 @@
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "advapi32.lib")
 #pragma comment(lib, "gdi32.lib")
+#pragma comment(lib, "Ole32.lib")
+#pragma comment(lib, "Shell32.lib")
 #pragma comment(lib, "D3D11.lib")
 #pragma comment(lib, "Dcomp.lib")
 
@@ -20,17 +22,27 @@
 #include <d3d11.h>
 #include <dcomp.h>
 #include <dxgi.h>
+#include <KnownFolders.h>
+#include <Shlobj.h>
 
 #include <array>
 #include <chrono>
 #include <cstdlib>
 #include <cstdint>
+#include <filesystem>
 #include <iomanip>      // std::setprecision
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <vector>
 
 using std::move;
+using std::vector;
+using std::string;
+using std::optional;
+namespace chrono = std::chrono;
+namespace fs = std::filesystem;
+
 using u32 = uint32_t;
 
 constexpr bool INTENSIFY = false;
@@ -47,8 +59,6 @@ constexpr bool INTENSIFY = false;
 
 // -
 
-namespace chrono = std::chrono;
-
 static const chrono::high_resolution_clock::time_point TIME_START =
       chrono::high_resolution_clock::now();
 
@@ -58,6 +68,31 @@ double run_ms() {
          chrono::duration<double>>(now - TIME_START)
          .count();
    return rel_now * 1000;
+}
+
+// -
+
+template<typename CallableT>
+class ScopeExitT final {
+    const CallableT mCallable;
+    bool mSkipCalling = false;
+
+public:
+    ScopeExitT(CallableT&& callable)
+        : mCallable(std::move(callable)) {}
+
+    ~ScopeExitT() {
+        if (mSkipCalling) return;
+        mCallable();
+    }
+    void release() {
+        mSkipCalling = true;
+    }
+};
+
+template<typename CallableT>
+auto scope_exit(CallableT&& callable) {
+    return ScopeExitT<CallableT>(std::move(callable));
 }
 
 // -
@@ -103,6 +138,187 @@ struct vec3 final {
    float y = 0;
    float z = 0;
 };
+
+// -
+
+optional<fs::path> path_by_known_folder_id(const KNOWNFOLDERID& rfid) {
+   //  "C:\Users" is returned rather than "C:\Users\"
+
+   wchar_t* path_buffer = nullptr;
+   const auto release = scope_exit([&]() {
+      CoTaskMemFree(path_buffer); // null ok too!
+   });
+   auto hr = SHGetKnownFolderPath(rfid, 0, nullptr, &path_buffer);
+   if (!SUCCEEDED(hr)) return {};
+
+   auto path_str = std::wstring(path_buffer);
+   return fs::path(path_str);
+}
+
+optional<fs::path> pictures_path() {
+   return path_by_known_folder_id(FOLDERID_Pictures);
+}
+optional<fs::path> home_path() {
+   return path_by_known_folder_id(FOLDERID_Profile);
+}
+
+// -
+
+std::string_view trim_front(std::string_view view) {
+   while (view.size()) {
+      const auto c = view.front();
+      if (!isspace(c)) break;
+      view = view.substr(1);
+   }
+   return view;
+}
+
+std::string_view trim_back(std::string_view view) {
+   while (view.size()) {
+      const auto c = view.back();
+      if (!isspace(c)) break;
+      view = view.substr(0, view.size() - 1);
+   }
+   return view;
+}
+
+std::string_view trim(std::string_view view) {
+   view = trim_front(view);
+   view = trim_back(view);
+   return view;
+}
+
+// -
+
+
+// -
+
+// "foo\"bar"_
+//           ^-end_of_string
+size_t find_end_of_quote(const std::string_view& view, size_t pos) {
+   const auto terminal = view.at(pos);
+   pos += 1;
+   while (pos != view.size()) {
+      pos = view.find(terminal, pos);
+      if (pos == std::npos) return std::npos;
+      const auto prev_view = view.substr(0, pos);
+      std::assert(prev_view.size());
+      pos += 1;
+      std::assert(pos <= view.size());
+      if (prev_view.back() == '\\') {
+         // Ugh.
+         const auto pos_before_escapes = prev_view.find_last_not_of('\\');
+         std::assert(pos_before_escapes != std::npos);
+         // E.g. `"foo\"bar"` -> 1
+         //   before-^  ^-pos
+         const auto escape_count = pos - 2 - pos_before_escapes;
+         const auto is_end_escaped = escape_count % 2 == 1;
+         if (is_end_escaped) continue;
+      }
+      return pos;
+   }
+   return std::npos;
+}
+
+size_t find_first_of_not_in_quote(const std::string_view& view,
+                                  const std::string_view& delim_list) {
+   size_t pos = 0;
+
+   constexpr auto BASIC_QUOTES = std::string("\"'");
+   const auto targets_and_quotes = BASIC_QUOTES + delim_list;
+
+   while (pos != view.size()) {
+      pos = view.find_first_of(targets_and_quotes, pos);
+      if (pos == std::npos) break;
+      const auto c = view.at(pos);
+      for (const auto& d : delim_list) {
+         if (c == d) return pos;
+      }
+
+      // Must be a quote.
+      pos = find_end_of_quote(view, pos); // Skip straight past it.
+      continue;
+   }
+   return std::npos;
+}
+
+// -
+
+struct IniData final {
+   struct Section final {
+      std::unordered_map<std::string, std::string> val_by_key;
+      // Lines with no '=' are stored as if "line" = ""
+   };
+   std::unordered_map<std::string, Section> section_by_full_name;
+   // E.g. if you declare [foo] and then [.bar], you need to access it
+   // by "foo.bar".
+
+   static IniData parse(std::string_view view) {
+      auto data = IniData{};
+
+      size_t line_num = 0;
+      auto cur_section_name = std::string{};
+      auto cur_section = Section{};
+      while (view.size()) {
+         line_num += 1;
+         (void)line_num; // We might not use this, but we want it.
+
+         const auto end_line = view.find('\n');
+         auto line = view.substr(0, end_line);
+         view = view.substr(end_line);
+
+         // -
+
+         constexpr auto COMMENT_DELIMS = std::string(";#");
+         const auto comment_pos = find_first_of_not_in_quote(line, COMMENT_DELIMS);
+         if (comment_pos != std::npos) {
+            line = view.substr(0, comment_pos);
+         }
+         line = line.trim();
+         if (!line.size()) continue;
+
+         // -
+
+         if (line.size() && line.front() == '[' && line.back() == ']') {
+            auto next_section_name = std::string{line.substr(1, line.size()-2)};
+            if (next_section_name.size() && next_section_name.front() == '.') {
+               next_section_name = cur_section.name + next_section_name;
+            }
+            data.section_by_full_name[move(cur_section_name)] = move(cur_section));
+
+            // This'll work even if we're switching from a section to itself.
+            cur_section_name = move(next_section_name);
+            cur_section = move(data.section_by_full_name[cur_section_name]);
+            continue;
+         }
+
+         // -
+
+         const auto equal_pos = find_first_of_not_in_quote(line, std::string("="));
+         auto key = std::string{line.substr(0, equal_pos).trim_back()};
+         auto val = std::string{};
+         if (equal_pos != std::npos) {
+            val = line.substr(equal_pos).trim_front();
+         }
+
+         // Drop quotes if present.
+         if (key.size() >= 2 && key.front() == '"' && key.back() == '"') {
+            key = key.substr(1, key.size() - 2);
+         }
+         if (val.size() >= 2 && val.front() == '"' && val.back() == '"') {
+            val = val.substr(1, val.size() - 2);
+         }
+         cur_section.val_by_key[move(key)] = move(val);
+      }
+      data.section_by_full_name[move(cur_section_name)] = move(cur_section));
+      return data;
+   }
+};
+
+struct Config final {
+   static optional<Config> load() {
+
+   }
 
 // -
 
@@ -325,32 +541,6 @@ public:
 };
 
 // -
-
-template<typename CallableT>
-class ScopeExitT final {
-    const CallableT mCallable;
-    bool mSkipCalling = false;
-
-public:
-    ScopeExitT(CallableT&& callable)
-        : mCallable(std::move(callable)) {}
-
-    ~ScopeExitT() {
-        if (mSkipCalling) return;
-        mCallable();
-    }
-    void release() {
-        mSkipCalling = true;
-    }
-};
-
-template<typename CallableT>
-auto scope_exit(CallableT&& callable) {
-    return ScopeExitT<CallableT>(std::move(callable));
-}
-
-// -
-
 
 //constexpr uint32_t BLUE = 0xfacf5b; // bbggrr
 //constexpr uint32_t PINK = 0xb9abf5; // bbggrr
