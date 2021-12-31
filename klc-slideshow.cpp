@@ -9,6 +9,7 @@
 #pragma comment(lib, "Shell32.lib")
 #pragma comment(lib, "D3D11.lib")
 #pragma comment(lib, "Dcomp.lib")
+#pragma comment(lib, "Gdiplus.lib")
 
 #ifndef UNICODE
 #define UNICODE
@@ -22,6 +23,7 @@
 #include <d3d11.h>
 #include <dcomp.h>
 #include <dxgi.h>
+#include <Gdiplus.h>
 #include <KnownFolders.h>
 #include <Shlobj.h>
 
@@ -34,6 +36,7 @@
 #include <memory>
 #include <optional>
 #include <sstream>
+#include <variant>
 #include <vector>
 
 using std::move;
@@ -43,7 +46,14 @@ using std::optional;
 namespace chrono = std::chrono;
 namespace fs = std::filesystem;
 
+// Rust has *such* better names.
+using f32 = float;
+using i32 = int32_t;
 using u32 = uint32_t;
+using f64 = double;
+using i64 = int64_t;
+using u64 = uint64_t;
+using usize = size_t;
 
 constexpr bool INTENSIFY = false;
 
@@ -141,7 +151,7 @@ struct vec3 final {
 
 // -
 
-optional<fs::path> path_by_known_folder_id(const KNOWNFOLDERID& rfid) {
+optional<fs::path> get_path_by_known_folder_id(const KNOWNFOLDERID& rfid) {
    //  "C:\Users" is returned rather than "C:\Users\"
 
    wchar_t* path_buffer = nullptr;
@@ -155,11 +165,11 @@ optional<fs::path> path_by_known_folder_id(const KNOWNFOLDERID& rfid) {
    return fs::path(path_str);
 }
 
-optional<fs::path> pictures_path() {
-   return path_by_known_folder_id(FOLDERID_Pictures);
+optional<fs::path> get_pictures_path() {
+   return get_path_by_known_folder_id(FOLDERID_Pictures);
 }
-optional<fs::path> home_path() {
-   return path_by_known_folder_id(FOLDERID_Profile);
+optional<fs::path> get_home_path() {
+   return get_path_by_known_folder_id(FOLDERID_Profile);
 }
 
 // -
@@ -253,6 +263,7 @@ struct IniData final {
    // E.g. if you declare [foo] and then [.bar], you need to access it
    // by "foo.bar".
 
+   // Not actually fallible. :)
    static IniData parse(std::string_view view) {
       auto data = IniData{};
 
@@ -315,11 +326,436 @@ struct IniData final {
    }
 };
 
-struct Config final {
-   static optional<Config> load() {
-
+/// E.g. result<Data,string>
+template<class T, class E>
+class result : protected std::variant<T, E> {
+public:
+   constexpr operator bool() noexcept {
+      return bool(val());
+   }
+   constexpr T& operator*() const {
+      return *val();
+   }
+   constexpr T* operator->() const {
+      return val();
    }
 
+   constexpr T* val() noexcept {
+      return std::get_if<0>(this);
+   }
+   constexpr E* err() noexcept {
+      return std::get_if<1>(this);
+   }
+};
+
+optional<string> read_small_text_file(const fs::path& path) {
+   // Method via "insane coder" from 2011:
+   // https://insanecoding.blogspot.com/2011/11/how-to-read-in-file-in-c.html
+   // > C++ streams have some very fast copying to another stream via
+   // > operator<< on their internal buffers. Therefore, we can copy
+   // > directly into a string stream, and then return the string that
+   // > string stream uses.
+
+   // Though we might as well create a filebuf directly.
+   // Tragically, that means you miss out on an std::wifstream joke. :P
+   auto in = basic_filebuf<typename path::value_type>{};
+   if (!in.open(path.c_str(), std::ios::in | std::ios::binary)) {
+      return {};
+   }
+   std::ostringstream out;
+   out << in;
+   in.close();
+   return out.str(); // Does not look like there's a way around
+                     // this copy. Ouch, oof.
+}
+
+enum class SceneLayout {
+   Solo,
+   DuoLeftMajor,
+   DuoRightMajor,
+   Trio,
+};
+
+constexpr std::string DEFAULT_CONFIG_INI = R"(
+
+secs_per_image = 5
+
+# 0: no pan, 1.0: starts just off screen, ends
+pan_screen_ratio = 0.2
+
+[scene weights]
+# These are pooled and selected from, so they don't have to sum to
+# anything particular.
+solo = 50
+duo_left_major = 11 ; Slightly sinister (also yes semicolons start comments too!
+duo_right_major = 10
+trio = 30
+
+[folders]
+~/Pictures
+
+)";
+
+// -
+
+template<class T>
+optional<T> parse_as(std::string_view) = delete;
+
+template<>
+optional<f32> parse_as<f32>(std::string_view view) {
+   auto pos = view.data();
+   const auto ret = strtof(pos, &pos);
+   if (pos == view.data()) {
+      // Didn't move, must have failed.
+      return {};
+   }
+   return ret;
+}
+
+template<>
+optional<i32> parse_as<i32>(std::string_view view) {
+   auto pos = view.data();
+   const auto ret = strtol(pos, &pos);
+   if (pos == view.data()) {
+      // Didn't move, must have failed.
+      return {};
+   }
+   return ret;
+}
+
+template<>
+optional<u32> parse_as<u32>(std::string_view view) {
+   auto pos = view.data();
+   const auto ret = strtoul(pos, &pos);
+   if (pos == view.data()) {
+      // Didn't move, must have failed.
+      return {};
+   }
+   return ret;
+}
+
+template<>
+optional<f64> parse_as<f64>(std::string_view view) {
+   auto pos = view.data();
+   const auto ret = strtod(pos, &pos);
+   if (pos == view.data()) {
+      // Didn't move, must have failed.
+      return {};
+   }
+   return ret;
+}
+
+template<>
+optional<i64> parse_as<i64>(std::string_view view) {
+   auto pos = view.data();
+   const auto ret = strtoll(pos, &pos);
+   if (pos == view.data()) {
+      // Didn't move, must have failed.
+      return {};
+   }
+   return ret;
+}
+
+template<>
+optional<u64> parse_as<u64>(std::string_view view) {
+   auto pos = view.data();
+   const auto ret = strtoull(pos, &pos);
+   if (pos == view.data()) {
+      // Didn't move, must have failed.
+      return {};
+   }
+   return ret;
+}
+
+// -
+
+template<class T>
+bool parse_into(std::string_view view, T* const out) {
+   const auto parsed = parse_as<T>(view);
+   if (parsed) {
+      *T = *parsed;
+   }
+   return parsed;
+}
+
+// -
+
+struct ImplNoCopy {
+   ImplNoCopy(const ImplNoCopy&) = delete;
+   ImplNoCopy& operator=(const ImplNoCopy&) = delete;
+};
+
+// -
+
+struct Config final : public ImplNoCopy {
+   // These are pooled and selected from, so they don't have to sum to
+   // anything particular.
+   struct SceneWeights {
+      // Let's do a map, so there's a reasonable order, even if we're
+      // choosing randomly.
+      std::map<SceneLayout, double> weight_by_scene;
+
+      SceneLayout choose(const double zero_to_one) const {
+         if (!weight_by_scene.size()) return SceneLayout::Solo;
+         double sum = 0;
+         for (const auto& pair : weight_by_scene) {
+            if (pair.second <= 0) continue;
+            sum += pair.second;
+         }
+         auto selected = zero_to_one * sum;
+         for (const auto& pair : weight_by_scene) {
+            if (pair.second <= 0) continue;
+            selected -= pair.second;
+            if (selected <= 0) return pair.first;
+         }
+         // Float math is a trip, so let's play it safe:
+         return weight_by_scene.begin()->first;
+      }
+   };
+
+   // -
+
+   // Deliberately make these different from the actual default config.
+   double secs_per_image = -1;
+   double pan_screen_ratio = -1; // 0: no pan, 1.0: starts just off screen, ends
+   optional<usize> hash_seed;
+
+   vector<string> image_folders;
+   SceneWeights scene_weights;
+
+   vector<string> unrecognized_sections;
+   vector<std::array<string,2>> unrecognized_keys;
+   vector<std::array<string,3>> unrecognized_values;
+
+   // -
+
+   static result<Config,string> load() {
+      const auto home_dir = get_home_path();
+      if (!home_dir) return string{"home_path() failed"};
+      auto config_dir = *home_dir / ".config";
+
+      const auto xdg_config_dir = std::getenv("XDG_CONFIG_HOME");
+      if (xdg_config_dir) {
+         config_dir = xdg_config_dir;
+      }
+
+      const auto config_file = config_dir / "klc-slideshow.ini";
+      if (!fs::exists(config_file)) {
+         return string{"config_file does not exist: "} + config_file.string();
+      }
+      const auto config_text = read_small_text_file(config_file);
+      REL_ASSERT(config_text, "read_small_text_file failed on extant file?");
+
+      const auto ini_data = IniData::parse(*config_text);
+      // I love that parsing ini cannot fail.
+      // We always just get...something.
+
+      const auto default_ini = IniData::parse(DEFAULT_CONFIG_INI);
+      const auto defaults = from_ini_data(default_ini);
+      REL_ASSERT(defaults.unrecognized_sections.empty());
+      REL_ASSERT(defaults.unrecognized_keys.empty());
+      REL_ASSERT(defaults.unrecognized_values.empty());
+
+      auto ret = from_ini_data(data);
+
+      if (ret.secs_per_image < 0) {
+         ret.secs_per_image = defaults.secs_per_image;
+         dout() << "[secs_per_image] defaulted.";
+      }
+      if (ret.pan_ratio < 0) {
+         ret.pan_ratio = defaults.pan_ratio;
+         dout() << "[pan_ratio] defaulted.";
+      }
+      if (ret.image_folders.empty()) {
+         ret.image_folders = defaults.image_folders;
+         dout() << "[image_folders] defaulted.";
+      }
+      if (ret.scene_weights.weight_by_scene.empty()) {
+         ret.scene_weights.weight_by_scene = defaults.scene_weights.weight_by_scene;
+         dout() << "[scene_weights] defaulted.";
+      }
+
+      for (const auto& name : ret.unrecognized_sections) {
+         dout() << "Unrecognized section [" << name << "] in " << config_file;
+      }
+      for (const auto& arr : ret.unrecognized_keys) {
+         dout() << "Unrecognized key [" << arr[0] << "] \""
+                << arr[1] "\" in " << config_file;
+      }
+      for (const auto& arr : ret.unrecognized_values) {
+         dout() << "Unrecognized value [" << arr[0] << "] \""
+                << arr[1] "\" = \"" << arr[2] << "\" in " << config_file;
+      }
+      return ret;
+   }
+
+   // So here's my take:
+   // Literally extract (and remove from maps) the sections and keys as
+   // you read them. If there are any leftover afterwards, you can let
+   // someone know, because it's probably a mispelled/unrecognized name.
+
+   static Config from_ini_data(IniData&& data) {
+      auto config = Config{};
+
+      // Let's do the root "[]" section keys
+      auto section = data.section_by_full_name.extract("");
+      if (section) {
+         auto& val_by_key = section.mapped().val_by_key;
+
+         const auto cur = val_by_key.extract("secs_per_image");
+         if (cur) {
+            (void)parse_into(cur.mapped(), &config.secs_per_image);
+         }
+
+         cur = val_by_key.extract("pan_screen_ratio");
+         if (cur) {
+            (void)parse_into(cur.mapped(), &config.pan_screen_ratio);
+         }
+
+         cur = val_by_key.extract("hash_seed");
+         if (cur) {
+            const auto& val = cur.mapped();
+            config.hash_seed = std::hash<string>{}(val);
+         }
+
+         for (const auto& key__val : val_by_key) {
+            unrecognized_keys.emplace_back({
+               section.key(), key__val.first
+            });
+         }
+      }
+
+      section = data.section_by_full_name.extract("image_folders");
+      if (section) {
+         for (const auto& key__val : val_by_key) {
+            const auto& key = key__val.first;
+            if (key.size()) {
+               config.image_folders.push_back(key);
+            }
+         }
+      }
+
+      section = data.section_by_full_name.extract("scene_weights");
+      if (section) {
+         auto& weight_by_scene = config.scene_weights.weight_by_scene;
+         for (const auto& key__val : val_by_key) {
+            const auto& key = key__val.first;
+            SceneLayout scene;
+            if (key == "solo") {
+               scene = SceneLayout::Solo;
+            } else if (key == "duo_left_major") {
+               scene = SceneLayout::DuoLeftMajor;
+            } else if (key == "duo_right_major") {
+               scene = SceneLayout::DuoRightMajor;
+            } else if (key == "trio") {
+               scene = SceneLayout::Trio;
+            } else {
+               unrecognized_entries.emplace_back({
+                  section.key(), key__val.first, key__val.second
+               });
+               continue;
+            }
+            const auto weight = parse_as<double>(key__val.second);
+            if (!weight) continue;
+            weight_by_scene[scene] = *weight;
+         }
+      }
+
+      for (const auto& name__section : data.section_by_full_name) {
+         config.unrecognized_sections.push_back(name__section.first);
+      }
+   }
+};
+
+// -
+
+static const std::unordered_set<string>
+
+// -
+
+template<class T>
+unique_ptr<T> as_unique_ptr(T* ptr) {
+   return unique_ptr<T>(ptr);
+}
+
+// -
+
+template<class T>
+usize std_hash(const T& x) {
+   return std::hash<T>{}(x);
+}
+
+class ImageManager : public ImplNoCopy {
+   std::map<usize, fs::path> image_path_by_hash;
+
+   explicit ImageManager(const Config& config) {
+      for (const auto& folder_str : config.image_folders) {
+         const auto path = fs::u8path(folder_str);
+         if (!fs::exists(path)) {
+            dout() << "Path does not exist: " << path.string();
+            continue;
+         }
+         const auto options = fs::directory_options::follow_directory_symlink
+            | fs::directory_options::skip_permission_denied;
+         auto ec = std::error_code{};
+         for (const auto& entry :
+               fs::recursive_directory_iterator(path, options, ec)) {
+            // Might as well hash all of these!
+            auto hash = std_hash(entry);
+            hash ^= config.hash_seed;
+            hash = std_hash(hash);
+
+            // Well uhh, let's just try to load directly?
+            // "You can create Image objects based on files of a variety
+            //  of types including BMP, GIF, JPEG, PNG, TIFF, and EMF."
+            constexpr bool USE_EMBEDDED_COLOR_MANAGEMENT = true;
+            const auto bm = as_unique_ptr(Bitmap::FromFile(entry.c_str(),
+                  USE_EMBEDDED_COLOR_MANAGEMENT));
+            if (!bm) continue; // Yeah, so what if that was a folder...
+
+            const auto rect = Rect{{}, {bm->GetWidth(), bm->GetHeight()}};
+            auto mapping = BitmapData{};
+            Bitmap::LockBits(&rect, ImageLockModeRead,
+               PixelFormat32bppPARGB, // premult-argb
+               &mapping);
+
+# error ok so we don't actually want to load them yet.
+What we want is to collect all the (likely-image?) paths, and sit on them.
+The playback engine will request images one by one, and we'll give back
+whichever one we can get to load first. They can build on top of this api.
+
+This is really s/ImageManager/OrderedImageStream/.
+
+We also need to support:
+* Deterministic first-image selection
+* as well as disabling randomization
+
+It would be cool to be able to easily do `./klc-slideshow <config or folder>`
+and have it just do the reasonable thing, and with some basic cli flags.
+
+
+
+           const std::filesystem::path& p,
+           std::filesystem::directory_options options,
+           std::error_code& ec );
+   }
+};
+
+
+         const auto home_path = get_home_path();
+         if (!home_path) {
+            dout() << "Warning: No home_path.";
+         }
+            auto path_str = std::string_view{key.first};
+            fs::path path;
+            if (path_str.size() && path_str.front() == '~' && home_path) {
+               path = *home_path / path_str.substr(1);
+            } else {
+               path = fs::u8path(path_str);
+            }
+            if (!fs::exists(path)) {
+               dout() << "Warning: Path does not exist: " << path.string();
+            }
 // -
 
 struct Brush final {
