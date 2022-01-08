@@ -28,14 +28,19 @@
 #include <Shlobj.h>
 
 #include <array>
+#include <cassert>
 #include <chrono>
 #include <cstdlib>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <iomanip>      // std::setprecision
+#include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <sstream>
+#include <unordered_map>
 #include <variant>
 #include <vector>
 
@@ -43,6 +48,8 @@ using std::move;
 using std::vector;
 using std::string;
 using std::optional;
+using std::unique_ptr;
+using std::shared_ptr;
 namespace chrono = std::chrono;
 namespace fs = std::filesystem;
 
@@ -143,10 +150,41 @@ inline DebugStream dout() {
 
 // -
 
+struct vec2 final {
+   float x = 0;
+   float y = 0;
+};
+
+struct ivec2 final {
+   i32 x = 0;
+   i32 y = 0;
+};
+
 struct vec3 final {
    float x = 0;
    float y = 0;
    float z = 0;
+
+   constexpr explicit operator vec2() {
+      return {x, y};
+   }
+};
+
+// -
+
+struct ImplNoCopy {
+   ImplNoCopy() = default;
+   ImplNoCopy(const ImplNoCopy&) = delete;
+   ImplNoCopy& operator=(const ImplNoCopy&) = delete;
+   ImplNoCopy(ImplNoCopy&&) = default;
+   ImplNoCopy& operator=(ImplNoCopy&&) = default;
+};
+
+// -
+
+struct PixelData : public ImplNoCopy {
+   ivec2 size = {};
+   std::vector<u32> pixels;
 };
 
 // -
@@ -210,15 +248,15 @@ size_t find_end_of_quote(const std::string_view& view, size_t pos) {
    pos += 1;
    while (pos != view.size()) {
       pos = view.find(terminal, pos);
-      if (pos == std::npos) return std::npos;
+      if (pos == string::npos) return string::npos;
       const auto prev_view = view.substr(0, pos);
-      std::assert(prev_view.size());
+      assert(prev_view.size());
       pos += 1;
-      std::assert(pos <= view.size());
+      assert(pos <= view.size());
       if (prev_view.back() == '\\') {
          // Ugh.
          const auto pos_before_escapes = prev_view.find_last_not_of('\\');
-         std::assert(pos_before_escapes != std::npos);
+         assert(pos_before_escapes != string::npos);
          // E.g. `"foo\"bar"` -> 1
          //   before-^  ^-pos
          const auto escape_count = pos - 2 - pos_before_escapes;
@@ -227,19 +265,20 @@ size_t find_end_of_quote(const std::string_view& view, size_t pos) {
       }
       return pos;
    }
-   return std::npos;
+   return string::npos;
 }
 
 size_t find_first_of_not_in_quote(const std::string_view& view,
                                   const std::string_view& delim_list) {
    size_t pos = 0;
 
-   constexpr auto BASIC_QUOTES = std::string("\"'");
-   const auto targets_and_quotes = BASIC_QUOTES + delim_list;
+   static const auto BASIC_QUOTES = string{"\"'"};
+   auto targets_and_quotes = BASIC_QUOTES;
+   targets_and_quotes += delim_list;
 
    while (pos != view.size()) {
       pos = view.find_first_of(targets_and_quotes, pos);
-      if (pos == std::npos) break;
+      if (pos == string::npos) break;
       const auto c = view.at(pos);
       for (const auto& d : delim_list) {
          if (c == d) return pos;
@@ -249,7 +288,7 @@ size_t find_first_of_not_in_quote(const std::string_view& view,
       pos = find_end_of_quote(view, pos); // Skip straight past it.
       continue;
    }
-   return std::npos;
+   return string::npos;
 }
 
 // -
@@ -280,12 +319,12 @@ struct IniData final {
 
          // -
 
-         constexpr auto COMMENT_DELIMS = std::string(";#");
+         static const auto COMMENT_DELIMS = std::string(";#");
          const auto comment_pos = find_first_of_not_in_quote(line, COMMENT_DELIMS);
-         if (comment_pos != std::npos) {
+         if (comment_pos != string::npos) {
             line = view.substr(0, comment_pos);
          }
-         line = line.trim();
+         line = trim(line);
          if (!line.size()) continue;
 
          // -
@@ -293,9 +332,9 @@ struct IniData final {
          if (line.size() && line.front() == '[' && line.back() == ']') {
             auto next_section_name = std::string{line.substr(1, line.size()-2)};
             if (next_section_name.size() && next_section_name.front() == '.') {
-               next_section_name = cur_section.name + next_section_name;
+               next_section_name = cur_section_name + next_section_name;
             }
-            data.section_by_full_name[move(cur_section_name)] = move(cur_section));
+            data.section_by_full_name[move(cur_section_name)] = move(cur_section);
 
             // This'll work even if we're switching from a section to itself.
             cur_section_name = move(next_section_name);
@@ -305,11 +344,11 @@ struct IniData final {
 
          // -
 
-         const auto equal_pos = find_first_of_not_in_quote(line, std::string("="));
-         auto key = std::string{line.substr(0, equal_pos).trim_back()};
-         auto val = std::string{};
-         if (equal_pos != std::npos) {
-            val = line.substr(equal_pos).trim_front();
+         const auto equal_pos = find_first_of_not_in_quote(line, string("="));
+         auto key = string{trim_back(line.substr(0, equal_pos))};
+         auto val = string{};
+         if (equal_pos != string::npos) {
+            val = trim_front(line.substr(equal_pos));
          }
 
          // Drop quotes if present.
@@ -321,7 +360,7 @@ struct IniData final {
          }
          cur_section.val_by_key[move(key)] = move(val);
       }
-      data.section_by_full_name[move(cur_section_name)] = move(cur_section));
+      data.section_by_full_name[move(cur_section_name)] = move(cur_section);
       return data;
    }
 };
@@ -330,6 +369,9 @@ struct IniData final {
 template<class T, class E>
 class result : protected std::variant<T, E> {
 public:
+   result(T&& val) : std::variant<T, E>{move(val)} {}
+   result(E&& err) : std::variant<T, E>{move(err)} {}
+
    constexpr operator bool() noexcept {
       return bool(val());
    }
@@ -358,12 +400,12 @@ optional<string> read_small_text_file(const fs::path& path) {
 
    // Though we might as well create a filebuf directly.
    // Tragically, that means you miss out on an std::wifstream joke. :P
-   auto in = basic_filebuf<typename path::value_type>{};
+   auto in = std::basic_filebuf<typename fs::path::value_type>{};
    if (!in.open(path.c_str(), std::ios::in | std::ios::binary)) {
       return {};
    }
    std::ostringstream out;
-   out << in;
+   out << &in;
    in.close();
    return out.str(); // Does not look like there's a way around
                      // this copy. Ouch, oof.
@@ -376,7 +418,7 @@ enum class SceneLayout {
    Trio,
 };
 
-constexpr std::string DEFAULT_CONFIG_INI = R"(
+static const string DEFAULT_CONFIG_INI = R"(
 
 secs_per_image = 5
 
@@ -404,7 +446,9 @@ optional<T> parse_as(std::string_view) = delete;
 template<>
 optional<f32> parse_as<f32>(std::string_view view) {
    auto pos = view.data();
-   const auto ret = strtof(pos, &pos);
+   const auto ret = strtof(pos, const_cast<char**>(&pos));
+   // Yep, standard lib isn't const-correct here...
+
    if (pos == view.data()) {
       // Didn't move, must have failed.
       return {};
@@ -415,7 +459,7 @@ optional<f32> parse_as<f32>(std::string_view view) {
 template<>
 optional<i32> parse_as<i32>(std::string_view view) {
    auto pos = view.data();
-   const auto ret = strtol(pos, &pos);
+   const auto ret = strtol(pos, const_cast<char**>(&pos), 10);
    if (pos == view.data()) {
       // Didn't move, must have failed.
       return {};
@@ -426,7 +470,7 @@ optional<i32> parse_as<i32>(std::string_view view) {
 template<>
 optional<u32> parse_as<u32>(std::string_view view) {
    auto pos = view.data();
-   const auto ret = strtoul(pos, &pos);
+   const auto ret = strtoul(pos, const_cast<char**>(&pos), 10);
    if (pos == view.data()) {
       // Didn't move, must have failed.
       return {};
@@ -437,7 +481,7 @@ optional<u32> parse_as<u32>(std::string_view view) {
 template<>
 optional<f64> parse_as<f64>(std::string_view view) {
    auto pos = view.data();
-   const auto ret = strtod(pos, &pos);
+   const auto ret = strtod(pos, const_cast<char**>(&pos));
    if (pos == view.data()) {
       // Didn't move, must have failed.
       return {};
@@ -448,7 +492,7 @@ optional<f64> parse_as<f64>(std::string_view view) {
 template<>
 optional<i64> parse_as<i64>(std::string_view view) {
    auto pos = view.data();
-   const auto ret = strtoll(pos, &pos);
+   const auto ret = strtoll(pos, const_cast<char**>(&pos), 10);
    if (pos == view.data()) {
       // Didn't move, must have failed.
       return {};
@@ -459,7 +503,7 @@ optional<i64> parse_as<i64>(std::string_view view) {
 template<>
 optional<u64> parse_as<u64>(std::string_view view) {
    auto pos = view.data();
-   const auto ret = strtoull(pos, &pos);
+   const auto ret = strtoull(pos, const_cast<char**>(&pos), 10);
    if (pos == view.data()) {
       // Didn't move, must have failed.
       return {};
@@ -473,17 +517,10 @@ template<class T>
 bool parse_into(std::string_view view, T* const out) {
    const auto parsed = parse_as<T>(view);
    if (parsed) {
-      *T = *parsed;
+      *out = *parsed;
    }
-   return parsed;
+   return !!parsed;
 }
-
-// -
-
-struct ImplNoCopy {
-   ImplNoCopy(const ImplNoCopy&) = delete;
-   ImplNoCopy& operator=(const ImplNoCopy&) = delete;
-};
 
 // -
 
@@ -518,7 +555,7 @@ struct Config final : public ImplNoCopy {
    // Deliberately make these different from the actual default config.
    double secs_per_image = -1;
    double pan_screen_ratio = -1; // 0: no pan, 1.0: starts just off screen, ends
-   optional<usize> hash_seed;
+   optional<usize> random_seed;
 
    vector<string> image_folders;
    SceneWeights scene_weights;
@@ -539,31 +576,32 @@ struct Config final : public ImplNoCopy {
          config_dir = xdg_config_dir;
       }
 
+      auto default_ini = IniData::parse(DEFAULT_CONFIG_INI);
+      auto defaults = from_ini_data(move(default_ini));
+      REL_ASSERT(defaults.unrecognized_sections.empty(), "defaults.unrecognized_sections");
+      REL_ASSERT(defaults.unrecognized_keys.empty(), "defaults.unrecognized_keys");
+      REL_ASSERT(defaults.unrecognized_values.empty(), "defaults.unrecognized_values");
+
       const auto config_file = config_dir / "klc-slideshow.ini";
       if (!fs::exists(config_file)) {
-         return string{"config_file does not exist: "} + config_file.string();
+         dout() << string{"config_file does not exist: "} + config_file.string();
+         return defaults;
       }
       const auto config_text = read_small_text_file(config_file);
       REL_ASSERT(config_text, "read_small_text_file failed on extant file?");
 
-      const auto ini_data = IniData::parse(*config_text);
+      auto ini_data = IniData::parse(*config_text);
       // I love that parsing ini cannot fail.
       // We always just get...something.
 
-      const auto default_ini = IniData::parse(DEFAULT_CONFIG_INI);
-      const auto defaults = from_ini_data(default_ini);
-      REL_ASSERT(defaults.unrecognized_sections.empty());
-      REL_ASSERT(defaults.unrecognized_keys.empty());
-      REL_ASSERT(defaults.unrecognized_values.empty());
-
-      auto ret = from_ini_data(data);
+      auto ret = from_ini_data(move(ini_data));
 
       if (ret.secs_per_image < 0) {
          ret.secs_per_image = defaults.secs_per_image;
          dout() << "[secs_per_image] defaulted.";
       }
-      if (ret.pan_ratio < 0) {
-         ret.pan_ratio = defaults.pan_ratio;
+      if (ret.pan_screen_ratio < 0) {
+         ret.pan_screen_ratio = defaults.pan_screen_ratio;
          dout() << "[pan_ratio] defaulted.";
       }
       if (ret.image_folders.empty()) {
@@ -580,11 +618,11 @@ struct Config final : public ImplNoCopy {
       }
       for (const auto& arr : ret.unrecognized_keys) {
          dout() << "Unrecognized key [" << arr[0] << "] \""
-                << arr[1] "\" in " << config_file;
+                << arr[1] << "\" in " << config_file;
       }
       for (const auto& arr : ret.unrecognized_values) {
          dout() << "Unrecognized value [" << arr[0] << "] \""
-                << arr[1] "\" = \"" << arr[2] << "\" in " << config_file;
+                << arr[1] << "\" = \"" << arr[2] << "\" in " << config_file;
       }
       return ret;
    }
@@ -602,7 +640,7 @@ struct Config final : public ImplNoCopy {
       if (section) {
          auto& val_by_key = section.mapped().val_by_key;
 
-         const auto cur = val_by_key.extract("secs_per_image");
+         auto cur = val_by_key.extract("secs_per_image");
          if (cur) {
             (void)parse_into(cur.mapped(), &config.secs_per_image);
          }
@@ -612,14 +650,14 @@ struct Config final : public ImplNoCopy {
             (void)parse_into(cur.mapped(), &config.pan_screen_ratio);
          }
 
-         cur = val_by_key.extract("hash_seed");
+         cur = val_by_key.extract("random_seed");
          if (cur) {
             const auto& val = cur.mapped();
-            config.hash_seed = std::hash<string>{}(val);
+            config.random_seed = std::hash<string>{}(val);
          }
 
          for (const auto& key__val : val_by_key) {
-            unrecognized_keys.emplace_back({
+            config.unrecognized_keys.emplace_back(std::array{
                section.key(), key__val.first
             });
          }
@@ -627,6 +665,8 @@ struct Config final : public ImplNoCopy {
 
       section = data.section_by_full_name.extract("image_folders");
       if (section) {
+         auto& val_by_key = section.mapped().val_by_key;
+
          for (const auto& key__val : val_by_key) {
             const auto& key = key__val.first;
             if (key.size()) {
@@ -637,6 +677,8 @@ struct Config final : public ImplNoCopy {
 
       section = data.section_by_full_name.extract("scene_weights");
       if (section) {
+         auto& val_by_key = section.mapped().val_by_key;
+
          auto& weight_by_scene = config.scene_weights.weight_by_scene;
          for (const auto& key__val : val_by_key) {
             const auto& key = key__val.first;
@@ -650,7 +692,7 @@ struct Config final : public ImplNoCopy {
             } else if (key == "trio") {
                scene = SceneLayout::Trio;
             } else {
-               unrecognized_entries.emplace_back({
+               config.unrecognized_values.emplace_back(std::array{
                   section.key(), key__val.first, key__val.second
                });
                continue;
@@ -664,12 +706,12 @@ struct Config final : public ImplNoCopy {
       for (const auto& name__section : data.section_by_full_name) {
          config.unrecognized_sections.push_back(name__section.first);
       }
+
+      // -
+
+      return config;
    }
 };
-
-// -
-
-static const std::unordered_set<string>
 
 // -
 
@@ -680,82 +722,155 @@ unique_ptr<T> as_unique_ptr(T* ptr) {
 
 // -
 
+inline bool starts_with(const string& str, const string& prefix) {
+   return str.find(prefix) == 0;
+}
+
 template<class T>
-usize std_hash(const T& x) {
+inline usize std_hash(const T& x) {
    return std::hash<T>{}(x);
 }
 
-class ImageManager : public ImplNoCopy {
-   std::map<usize, fs::path> image_path_by_hash;
+class ImageLoader : public ImplNoCopy {
+   struct Entry final {
+      usize primary_order_key = 0;
+      fs::path path = {};
 
-   explicit ImageManager(const Config& config) {
+      auto tie() const {
+         return std::tie(primary_order_key, path);
+      }
+
+      bool operator<(const Entry& rhs) const {
+         return tie() < rhs.tie();
+      }
+   };
+   const optional<usize> _random_seed;
+   std::set<Entry> _path_entries;
+   std::set<Entry>::iterator _prev_loaded = {}; // Never invalidated.
+
+public:
+   explicit ImageLoader(const Config& config) : _random_seed(config.random_seed) {
+      _prev_loaded = _path_entries.begin();
+
       for (const auto& folder_str : config.image_folders) {
-         const auto path = fs::u8path(folder_str);
+         fs::path path;
+         if (starts_with(folder_str, "~/")) {
+            const auto rel_path = folder_str.substr(2);
+            path = *get_home_path() / rel_path;
+         } else {
+            path = fs::u8path(folder_str);
+         }
          if (!fs::exists(path)) {
-            dout() << "Path does not exist: " << path.string();
+            dout() << "Path does not exist: " << path.string()
+                   << " (" << folder_str << ")";
             continue;
          }
+
          const auto options = fs::directory_options::follow_directory_symlink
             | fs::directory_options::skip_permission_denied;
          auto ec = std::error_code{};
-         for (const auto& entry :
+         for (const auto& cur_path :
                fs::recursive_directory_iterator(path, options, ec)) {
-            // Might as well hash all of these!
-            auto hash = std_hash(entry);
-            hash ^= config.hash_seed;
-            hash = std_hash(hash);
+            add(cur_path);
+         }
+      }
+   }
 
-            // Well uhh, let's just try to load directly?
-            // "You can create Image objects based on files of a variety
-            //  of types including BMP, GIF, JPEG, PNG, TIFF, and EMF."
-            constexpr bool USE_EMBEDDED_COLOR_MANAGEMENT = true;
-            const auto bm = as_unique_ptr(Bitmap::FromFile(entry.c_str(),
-                  USE_EMBEDDED_COLOR_MANAGEMENT));
-            if (!bm) continue; // Yeah, so what if that was a folder...
+   auto primary_order_key(const fs::path& path) const {
+      usize ret = 0;
+      if (_random_seed) {
+         ret = std_hash(path.string());
+         ret ^= *_random_seed;
+         ret = std_hash(ret);
+      }
+      return ret;
+   }
 
-            const auto rect = Rect{{}, {bm->GetWidth(), bm->GetHeight()}};
-            auto mapping = BitmapData{};
-            Bitmap::LockBits(&rect, ImageLockModeRead,
-               PixelFormat32bppPARGB, // premult-argb
-               &mapping);
+   std::set<Entry>::iterator add(const fs::path& path) {
+      const auto order = primary_order_key(path);
+      return _path_entries.insert({order, path}).first;
+   }
 
-# error ok so we don't actually want to load them yet.
-What we want is to collect all the (likely-image?) paths, and sit on them.
-The playback engine will request images one by one, and we'll give back
-whichever one we can get to load first. They can build on top of this api.
+   static inline optional<PixelData> load(const fs::path& path) {
+      // "You can create Image objects based on files of a variety
+      //  of types including BMP, GIF, JPEG, PNG, TIFF, and EMF."
+      constexpr bool USE_EMBEDDED_COLOR_MANAGEMENT = true;
+      auto bm = as_unique_ptr(Gdiplus::Bitmap::FromFile(path.c_str(),
+            USE_EMBEDDED_COLOR_MANAGEMENT));
+      if (!bm) return {}; // Yeah, so maybe that was a folder...
 
-This is really s/ImageManager/OrderedImageStream/.
+      const auto rect = Gdiplus::Rect{{}, {
+         static_cast<i32>(bm->GetWidth()),
+         static_cast<i32>(bm->GetHeight())}};
+      auto mapping = Gdiplus::BitmapData{};
+      bm->LockBits(&rect, Gdiplus::ImageLockModeRead,
+         PixelFormat32bppPARGB, // premult-argb
+         &mapping);
+      const auto unmap = scope_exit([&]() {
+         bm->UnlockBits(&mapping);
+      });
 
-We also need to support:
-* Deterministic first-image selection
-* as well as disabling randomization
+      auto data = PixelData{};
+      data.size = {static_cast<i32>(bm->GetWidth()),
+                   static_cast<i32>(bm->GetHeight())};
+      data.pixels.resize(data.size.x * data.size.y);
 
-It would be cool to be able to easily do `./klc-slideshow <config or folder>`
-and have it just do the reasonable thing, and with some basic cli flags.
+      auto src = static_cast<const std::byte*>(mapping.Scan0);
+      auto dst = reinterpret_cast<std::byte*>(data.pixels.data());
+      const auto srcStride = mapping.Stride;
+      const auto bytesPerRow = data.size.x * 4;
+      const auto dstStride = bytesPerRow;
+      for (int y = 0; y < data.size.y; y++) {
+         memcpy(dst, src, bytesPerRow);
+         src += srcStride;
+         dst += dstStride;
+      }
 
+      return data;
+   }
 
+   auto size() const {
+      return _path_entries.size();
+   }
 
-           const std::filesystem::path& p,
-           std::filesystem::directory_options options,
-           std::error_code& ec );
+   optional<PixelData> load_next() {
+      while (_path_entries.size()) {
+         auto cur_itr = _prev_loaded;
+         ++cur_itr;
+         if (cur_itr == _path_entries.end()) {
+            cur_itr = _path_entries.begin();
+         }
+         auto ret = load(cur_itr->path);
+         if (ret) {
+            _prev_loaded = cur_itr;
+            return ret;
+         }
+         _path_entries.erase(cur_itr);
+      }
+      return {};
    }
 };
 
+class Scene final {
+public:
+   static unique_ptr<Scene> Build(const Config& config,
+                                  ImageLoader& loader) {
+      const f64 rand_0_1incl = f64(rand()) / RAND_MAX;
+      auto layout = config.scene_weights.choose(rand_0_1incl);
+      layout = SceneLayout::Solo; // Oops all solo.
+      switch (layout) {
+      case SceneLayout::Solo:
+         {
 
-         const auto home_path = get_home_path();
-         if (!home_path) {
-            dout() << "Warning: No home_path.";
          }
-            auto path_str = std::string_view{key.first};
-            fs::path path;
-            if (path_str.size() && path_str.front() == '~' && home_path) {
-               path = *home_path / path_str.substr(1);
-            } else {
-               path = fs::u8path(path_str);
-            }
-            if (!fs::exists(path)) {
-               dout() << "Warning: Path does not exist: " << path.string();
-            }
+      case SceneLayout::DuoLeftMajor:
+      case SceneLayout::DuoRightMajor:
+      case SceneLayout::Trio:
+         REL_ASSERT(false, "todo");
+      }
+   }
+};
+
 // -
 
 struct Brush final {
@@ -987,11 +1102,6 @@ constexpr std::array STRIPES_aarrggbb{
    BLUE, PINK, WHITE, PINK, BLUE,
 };
 
-struct PixelData final {
-   vec3 size = {0,1,1};
-   std::vector<u32> pixels;
-};
-
 PixelData make_flag() {
    // 5x3 aspect ratio.
    const auto W = STRIPES_aarrggbb.size() * 5;
@@ -1034,6 +1144,82 @@ void draw_flag(const HDC dc, const RECT& rect) {
 
 // -
 
+// We're using DComp parlance
+class Visual {
+public:
+   struct Data {
+      sp<IDCompositionVisual> vis;
+      ivec2 size = {};
+   };
+   const Data m;
+
+   static shared_ptr<Visual> create(IDCompositionDevice& dcomp,
+                                    ID3D11Device& d3d,
+                                    const PixelData& src) {
+      sp<IDCompositionSurface> surf;
+      dcomp.CreateSurface(src.size.x, src.size.y,
+         DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_ALPHA_MODE_IGNORE,
+         &surf.setter_addrefs());
+      REL_ASSERT(surf, "dcomp->CreateSurface");
+
+      {
+         sp<ID3D11Texture2D> dst_tex;
+         auto draw_offset = POINT{};
+         surf->BeginDraw(nullptr, dst_tex.UUID(),
+               &dst_tex.setter_addrefs<void>(), &draw_offset);
+         REL_ASSERT(dst_tex, "surf->BeginDraw");
+
+         const auto end_draw = scope_exit([&]() {
+            surf->EndDraw();
+         });
+
+         sp<ID3D11DeviceContext> context;
+         d3d.GetImmediateContext(&context.setter_addrefs());
+         REL_ASSERT(context, "context");
+
+         auto dst_box = D3D11_BOX{};
+         dst_box.left = draw_offset.x;
+         dst_box.top = draw_offset.y;
+         dst_box.right = dst_box.left + src.size.x;
+         dst_box.bottom = dst_box.top + src.size.y;
+         dst_box.front = 0;
+         dst_box.back = 1;
+         context->UpdateSubresource(dst_tex, 0, &dst_box,
+                                    src.pixels.data(),
+                                    src.size.x * 4,
+                                    src.size.y * src.size.x * 4);
+         //context->Flush();
+      }
+
+      auto m = Data{};
+      m.size = src.size;
+      dcomp.CreateVisual(&m.vis.setter_addrefs());
+      REL_ASSERT(m.vis, "CreateVisual");
+      auto hr = m.vis->SetContent(surf);
+      REL_ASSERT(SUCCEEDED(hr), "SetContent");
+
+      return std::make_shared<Visual>(std::move(m));
+   }
+
+   Visual(Data&& data) : m(std::move(data)) {}
+
+   // No-op would be from:0,0 to:1,1
+   void set_rect(const vec3& from, const vec3& to) const {
+      //dout() << "from " << from.x << "," << from.y;
+      //dout() << "to " << to.x << "," << to.y;
+      auto mat = D2D_MATRIX_3X2_F{};
+      mat.m11 = (to.x - from.x);
+      mat.m22 = (to.y - from.y);
+      mat.dx = from.x * m.size.x;
+      mat.dy = from.y * m.size.y;
+
+      auto hr = m.vis->SetTransform(mat);
+      REL_ASSERT(SUCCEEDED(hr), "SetTransform");
+   }
+};
+
+// -
+
 class Renderer {
 public:
    struct Data {
@@ -1043,7 +1229,7 @@ public:
       sp<IDCompositionTarget> dc_target;
       sp<IDCompositionVisual> flag_vis;
       sp<IDCompositionSurface> flag_surf;
-      vec3 flag_size = {};
+      ivec2 flag_size = {};
    };
    const Data m;
 
@@ -1086,8 +1272,10 @@ public:
       m.dcomp->CreateVisual(&m.flag_vis.setter_addrefs());
       if (!m.flag_vis) return nullptr;
 
-      auto hr = m.dc_target->SetRoot(m.flag_vis);
-      REL_ASSERT(SUCCEEDED(hr), "SetRoot");
+      HRESULT hr;
+
+      //auto hr = m.dc_target->SetRoot(m.flag_vis);
+      //REL_ASSERT(SUCCEEDED(hr), "SetRoot");
 
       // -
       // Create a visual from a bitmap.
@@ -1187,6 +1375,9 @@ public:
       hr = m.flag_vis->SetContent(m.flag_surf);
       REL_ASSERT(SUCCEEDED(hr), "SetContent");
 
+      hr = m.dc_target->SetRoot(m.flag_vis);
+      REL_ASSERT(SUCCEEDED(hr), "SetRoot");
+
       const auto debug = m.d3d.qi<ID3D11Debug>();
       REL_ASSERT(debug, "debug");
       debug->ReportLiveDeviceObjects( D3D11_RLDO_SUMMARY | D3D11_RLDO_DETAIL );
@@ -1200,6 +1391,10 @@ private:
 public:
    ~Renderer() = default;
 
+   void SetFrontPos(const vec3& from, const vec3& to) const {
+
+   }
+
    void Draw(const vec3& from, const vec3& to) const {
       //dout() << "from " << from.x << "," << from.y;
       //dout() << "to " << to.x << "," << to.y;
@@ -1211,6 +1406,7 @@ public:
 
       auto hr = m.flag_vis->SetTransform(mat);
       REL_ASSERT(SUCCEEDED(hr), "SetTransform");
+
 
       hr = m.dcomp->Commit();
       REL_ASSERT(SUCCEEDED(hr), "dcomp->Commit");
@@ -1238,12 +1434,22 @@ public:
    struct Data final {
       HWND window;
       std::unique_ptr<Renderer> renderer;
+      Config config = {};
    };
    const Data m;
+   shared_ptr<Visual> _front_vis;
+   ImageLoader _image_loader;
 
    static std::unique_ptr<Slideshow> Create(const HWND window) {
       auto m = Data{};
       m.window = window;
+
+      auto res = Config::load();
+      if (!res) {
+         dout() << "Config::load failed: " << *res.err();
+      }
+      REL_ASSERT(res, "Config::load");
+      m.config = move(*res.val());
 
       m.renderer = Renderer::Create(window);
       if (!m.renderer) return nullptr;
@@ -1251,7 +1457,15 @@ public:
       return std::unique_ptr<Slideshow>(new Slideshow(std::move(m)));
    }
 
-   Slideshow(Data&& data) : m(std::move(data)) {}
+   Slideshow(Data&& data) : m(std::move(data)), _image_loader(m.config) {
+      const auto next = _image_loader.load_next();
+      REL_ASSERT(next, "_image_loader.load_next");
+
+      const auto vis = Visual::create(*m.renderer->m.dcomp,
+            *m.renderer->m.d3d, *next);
+      REL_ASSERT(vis, "Visual::create");
+      _front_vis = vis;
+   }
 
    ~Slideshow() = default;
 
@@ -1281,15 +1495,25 @@ public:
       to.x += size/2;
       to.y += size/2;
 
-      auto win_rect = RECT{};
-      GetWindowRect(m.window, &win_rect);
-      from.x *= win_rect.right - win_rect.left;
-      from.y *= win_rect.bottom - win_rect.top;
-      to.x *= win_rect.right - win_rect.left;
-      to.y *= win_rect.bottom - win_rect.top;
-
       if (1) {
-         m.renderer->Draw(from, to);
+         if (_front_vis) {
+            auto front_from = from;
+            front_from.x = front_from.y;
+            auto front_to = to;
+            front_to.x = front_to.y;
+            _front_vis->set_rect(front_from, front_to);
+         }
+
+         auto win_rect = RECT{};
+         GetWindowRect(m.window, &win_rect);
+         auto win_from = from;
+         auto win_to = to;
+         win_from.x *= win_rect.right - win_rect.left;
+         win_from.y *= win_rect.bottom - win_rect.top;
+         win_to.x *= win_rect.right - win_rect.left;
+         win_to.y *= win_rect.bottom - win_rect.top;
+
+         m.renderer->Draw(win_from, win_to);
          ValidateRect(m.window, nullptr);
 
          //InvalidateRect(m.window, nullptr, false);
