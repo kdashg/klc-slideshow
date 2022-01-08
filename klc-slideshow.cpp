@@ -311,11 +311,12 @@ struct IniData final {
       auto cur_section = Section{};
       while (view.size()) {
          line_num += 1;
+         dout() << line_num;
          (void)line_num; // We might not use this, but we want it.
 
          const auto end_line = view.find('\n');
          auto line = view.substr(0, end_line);
-         view = view.substr(end_line);
+         view = view.substr(end_line+1);
 
          // -
 
@@ -425,7 +426,7 @@ secs_per_image = 5
 # 0: no pan, 1.0: starts just off screen, ends
 pan_screen_ratio = 0.2
 
-[scene weights]
+[scene_weights]
 # These are pooled and selected from, so they don't have to sum to
 # anything particular.
 solo = 50
@@ -433,7 +434,7 @@ duo_left_major = 11 ; Slightly sinister (also yes semicolons start comments too!
 duo_right_major = 10
 trio = 30
 
-[folders]
+[image_folders]
 ~/Pictures
 
 )";
@@ -566,6 +567,20 @@ struct Config final : public ImplNoCopy {
 
    // -
 
+   void log_unrecognized(const std::string_view config_file) const {
+      for (const auto& name : unrecognized_sections) {
+         dout() << "Unrecognized section [" << name << "] in " << config_file;
+      }
+      for (const auto& arr : unrecognized_keys) {
+         dout() << "Unrecognized key [" << arr[0] << "] \""
+                << arr[1] << "\" in " << config_file;
+      }
+      for (const auto& arr : unrecognized_values) {
+         dout() << "Unrecognized value [" << arr[0] << "] \""
+                << arr[1] << "\" = \"" << arr[2] << "\" in " << config_file;
+      }
+   }
+
    static result<Config,string> load() {
       const auto home_dir = get_home_path();
       if (!home_dir) return string{"home_path() failed"};
@@ -578,6 +593,7 @@ struct Config final : public ImplNoCopy {
 
       auto default_ini = IniData::parse(DEFAULT_CONFIG_INI);
       auto defaults = from_ini_data(move(default_ini));
+      defaults.log_unrecognized("<defaults.ini>");
       REL_ASSERT(defaults.unrecognized_sections.empty(), "defaults.unrecognized_sections");
       REL_ASSERT(defaults.unrecognized_keys.empty(), "defaults.unrecognized_keys");
       REL_ASSERT(defaults.unrecognized_values.empty(), "defaults.unrecognized_values");
@@ -613,17 +629,7 @@ struct Config final : public ImplNoCopy {
          dout() << "[scene_weights] defaulted.";
       }
 
-      for (const auto& name : ret.unrecognized_sections) {
-         dout() << "Unrecognized section [" << name << "] in " << config_file;
-      }
-      for (const auto& arr : ret.unrecognized_keys) {
-         dout() << "Unrecognized key [" << arr[0] << "] \""
-                << arr[1] << "\" in " << config_file;
-      }
-      for (const auto& arr : ret.unrecognized_values) {
-         dout() << "Unrecognized value [" << arr[0] << "] \""
-                << arr[1] << "\" = \"" << arr[2] << "\" in " << config_file;
-      }
+      ret.log_unrecognized(config_file.string());
       return ret;
    }
 
@@ -1098,8 +1104,15 @@ public:
 constexpr uint32_t BLUE = 0xff5bcffa; // aarrggbb
 constexpr uint32_t PINK = 0xfff5abb9; // aarrggbb
 constexpr uint32_t WHITE = 0xffffffff;
+constexpr uint32_t MAGENTA = 0xffff00ff;
+constexpr uint32_t BLACK = 0xff000000;
 constexpr std::array STRIPES_aarrggbb{
    BLUE, PINK, WHITE, PINK, BLUE,
+};
+constexpr std::array MISSING_TEX = {
+   MAGENTA, BLACK, MAGENTA,
+   BLACK, MAGENTA, BLACK,
+   MAGENTA, BLACK, MAGENTA,
 };
 
 PixelData make_flag() {
@@ -1116,6 +1129,13 @@ PixelData make_flag() {
       dout() << std::hex << color;
       ret.pixels.resize(ret.pixels.size() + elems_per_stripe, color);
    }
+   return ret;
+}
+
+PixelData make_missing_tex() {
+   auto ret = PixelData{};
+   ret.size = {3,3};
+   ret.pixels.assign(MISSING_TEX.begin(), MISSING_TEX.end());
    return ret;
 }
 
@@ -1380,7 +1400,7 @@ public:
 
       const auto debug = m.d3d.qi<ID3D11Debug>();
       REL_ASSERT(debug, "debug");
-      debug->ReportLiveDeviceObjects( D3D11_RLDO_SUMMARY | D3D11_RLDO_DETAIL );
+      //debug->ReportLiveDeviceObjects( D3D11_RLDO_SUMMARY | D3D11_RLDO_DETAIL );
 
       return std::unique_ptr<Renderer>(new Renderer(std::move(m)));
    }
@@ -1441,6 +1461,7 @@ public:
    ImageLoader _image_loader;
 
    static std::unique_ptr<Slideshow> Create(const HWND window) {
+      dout() << "Slideshow::Create";
       auto m = Data{};
       m.window = window;
 
@@ -1458,13 +1479,22 @@ public:
    }
 
    Slideshow(Data&& data) : m(std::move(data)), _image_loader(m.config) {
-      const auto next = _image_loader.load_next();
-      REL_ASSERT(next, "_image_loader.load_next");
+      dout() << "Slideshow::ctor";
+      auto next = _image_loader.load_next();
+      if (!next) {
+         next = move(make_missing_tex());
+      }
+      REL_ASSERT(next, "_image_loader.load_next/make_flag");
+      dout() << "Slideshow::ctor 2";
 
       const auto vis = Visual::create(*m.renderer->m.dcomp,
             *m.renderer->m.d3d, *next);
       REL_ASSERT(vis, "Visual::create");
       _front_vis = vis;
+
+      m.renderer->m.flag_vis->AddVisual(vis->m.vis, true, nullptr);
+
+      dout() << "Slideshow::ctor 3";
    }
 
    ~Slideshow() = default;
@@ -1555,6 +1585,7 @@ LRESULT WINAPI ScreenSaverProcW(HWND window, UINT msg, WPARAM wp, LPARAM lp) {
       OutputDebugStringA(" ");
       OutputDebugStringA("klc-slideshow WM_CREATE");
       sSlideshow = Slideshow::Create(window);
+      dout() << "sSlideshow";
       REL_ASSERT(sSlideshow, "Slideshow::Create");
       return 0;
 
